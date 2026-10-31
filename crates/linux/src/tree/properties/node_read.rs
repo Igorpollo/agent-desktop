@@ -244,6 +244,11 @@ pub(crate) async fn read_node_for(
         }
     };
     let interfaces = selected(interfaces, liveness)?;
+    let attributes = selected::<BTreeMap<String, String>>(attributes, liveness)?;
+    let webkit = attributes
+        .present()
+        .and_then(|attributes| attributes.get("toolkit"))
+        .is_some_and(|toolkit| toolkit == "WebKitGTK");
     let (extents, actions) = join(
         async {
             if purpose.bounds() {
@@ -254,7 +259,7 @@ pub(crate) async fn read_node_for(
         },
         async {
             if purpose.actions() {
-                read_actions(connection, element, &interfaces, liveness).await
+                read_actions(connection, element, &interfaces, liveness, webkit).await
             } else {
                 Ok(Field::Failed("field not requested".to_owned()))
             }
@@ -273,7 +278,7 @@ pub(crate) async fn read_node_for(
             states: selected(state, liveness)?,
             interfaces,
         },
-        attributes: selected::<BTreeMap<String, String>>(attributes, liveness)?,
+        attributes,
         extents: extents?,
         actions: actions?,
         children: match child_reply {

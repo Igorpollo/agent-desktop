@@ -78,9 +78,13 @@ pub(in crate::tree) async fn read_actions(
     element: &AtspiElement,
     interfaces: &Field<Vec<String>>,
     liveness: Liveness,
+    webkit: bool,
 ) -> Result<Field<Vec<String>>, AdapterError> {
     if let Some(skipped) = skipped_without(interfaces, ACTION_INTERFACE) {
         return Ok(skipped);
+    }
+    if webkit {
+        return read_indexed_actions(connection, element, liveness).await;
     }
     let reply = call(connection, element, ACTION_INTERFACE, "GetActions", &()).await;
     let listed = field(
@@ -105,6 +109,39 @@ pub(in crate::tree) async fn read_actions(
         Field::Absent => Field::Absent,
         Field::Failed(detail) => Field::Failed(detail),
     })
+}
+
+/// WebKitGTK exposes NActions and GetName but does not answer GetActions.
+async fn read_indexed_actions(
+    connection: &Connection,
+    element: &AtspiElement,
+    liveness: Liveness,
+) -> Result<Field<Vec<String>>, AdapterError> {
+    let reply = call(
+        connection,
+        element,
+        crate::system::PROPERTIES_INTERFACE,
+        "Get",
+        &(ACTION_INTERFACE, "NActions"),
+    )
+    .await;
+    let count = field(deserialize::<zbus::zvariant::OwnedValue>(reply), liveness)?;
+    let count = match count {
+        Field::Present(value) => match value.downcast_ref::<i32>() {
+            Ok(count) if (0..=1024).contains(&count) => count,
+            _ => return Ok(Field::Failed("invalid Action.NActions count".to_owned())),
+        },
+        Field::Failed(detail) => return Ok(Field::Failed(detail)),
+        Field::Absent => return Ok(Field::Absent),
+    };
+    let names = collect_bounded(
+        ACTION_NAMES_IN_FLIGHT,
+        (0..count).map(|index| action_name(connection, element, index, String::new())),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(Field::Present(names))
 }
 
 #[cfg(test)]

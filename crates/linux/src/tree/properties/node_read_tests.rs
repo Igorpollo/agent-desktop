@@ -142,3 +142,77 @@ fn snapshot_reads_only_named_properties_without_bulk_or_unadvertised_reads() {
         "bulk property reads or unadvertised interfaces must never be invoked"
     );
 }
+
+#[test]
+fn webkit_nodes_of_both_ports_never_receive_the_unanswered_bulk_action_call() {
+    use crate::tree::AtspiElement;
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use zbus::connection::Builder;
+
+    struct Accessible(&'static str);
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl Accessible {
+        fn get_role(&self) -> u32 {
+            43
+        }
+        fn get_interfaces(&self) -> Vec<String> {
+            vec![
+                "org.a11y.atspi.Accessible".into(),
+                "org.a11y.atspi.Action".into(),
+            ]
+        }
+        fn get_attributes(&self) -> HashMap<String, String> {
+            HashMap::from([("toolkit".to_owned(), self.0.to_owned())])
+        }
+    }
+    struct Action(Arc<AtomicUsize>);
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl Action {
+        #[zbus(property, name = "NActions")]
+        fn n_actions(&self) -> i32 {
+            1
+        }
+        fn get_name(&self, _index: i32) -> &str {
+            "press"
+        }
+        fn get_actions(&self) -> Vec<(String, String, String)> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            vec![]
+        }
+    }
+    for toolkit in ["WebKitGTK", "WPEWebKit"] {
+        let bulk = Arc::new(AtomicUsize::new(0));
+        let (near, far) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (client, server) = zbus::block_on(futures_lite::future::zip(
+            Builder::async_io_unix_stream(near)
+                .p2p()
+                .method_timeout(std::time::Duration::from_secs(5))
+                .build(),
+            Builder::async_io_unix_stream(far)
+                .server(zbus::Guid::generate())
+                .unwrap()
+                .p2p()
+                .serve_at("/node", Accessible(toolkit))
+                .unwrap()
+                .serve_at("/node", Action(bulk.clone()))
+                .unwrap()
+                .build(),
+        ));
+        let _server = server.unwrap();
+        let node = zbus::block_on(super::read_node(
+            &client.unwrap(),
+            &AtspiElement::new(":1.1", "/node", 1),
+        ))
+        .unwrap();
+        assert_eq!(
+            node.actions,
+            crate::tree::Field::Present(vec!["press".to_owned()]),
+            "{toolkit}"
+        );
+        assert_eq!(bulk.load(Ordering::SeqCst), 0, "{toolkit}");
+    }
+}

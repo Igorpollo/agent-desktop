@@ -7,6 +7,7 @@ use zbus::zvariant::{DynamicDeserialize, DynamicType, OwnedValue};
 use zbus::{Connection, Message};
 
 use super::absence::gone_error;
+use super::attributes::is_webkit;
 use super::interface_reads::{read_actions, read_extents};
 use super::liveness::Liveness;
 use super::read_purpose::ReadPurpose;
@@ -245,10 +246,7 @@ pub(crate) async fn read_node_for(
     };
     let interfaces = selected(interfaces, liveness)?;
     let attributes = selected::<BTreeMap<String, String>>(attributes, liveness)?;
-    let webkit = attributes
-        .present()
-        .and_then(|attributes| attributes.get("toolkit"))
-        .is_some_and(|toolkit| toolkit == "WebKitGTK");
+    let webkit = is_webkit(&attributes);
     let (extents, actions) = join(
         async {
             if purpose.bounds() {

@@ -8,6 +8,7 @@ use crate::tree::{AtspiElement, Extents, Field};
 
 const ACTION_INTERFACE: &str = "org.a11y.atspi.Action";
 const ACTION_NAMES_IN_FLIGHT: usize = 4;
+const MAX_INDEXED_ACTIONS: i32 = 1024;
 const SCREEN_COORDINATES: u32 = 0;
 
 /// `None` when the interface is advertised and its reads should go ahead.
@@ -72,7 +73,9 @@ async fn action_name(
 /// `GetName(i)` is the only call that returns the machine name on every
 /// toolkit: `GetActions` returns empty names on Chromium and junk on Gecko.
 /// `GetActions` supplies the count and the fallback for an index whose
-/// `GetName` method is refused. Connection loss ends the read.
+/// `GetName` method is refused. On a `webkit` node, which never answers
+/// `GetActions`, `NActions` supplies the count and a refused `GetName` fails
+/// the field, since no fallback exists. Connection loss ends the read.
 pub(in crate::tree) async fn read_actions(
     connection: &Connection,
     element: &AtspiElement,
@@ -111,7 +114,6 @@ pub(in crate::tree) async fn read_actions(
     })
 }
 
-/// WebKitGTK exposes NActions and GetName but does not answer GetActions.
 async fn read_indexed_actions(
     connection: &Connection,
     element: &AtspiElement,
@@ -128,20 +130,39 @@ async fn read_indexed_actions(
     let count = field(deserialize::<zbus::zvariant::OwnedValue>(reply), liveness)?;
     let count = match count {
         Field::Present(value) => match value.downcast_ref::<i32>() {
-            Ok(count) if (0..=1024).contains(&count) => count,
-            _ => return Ok(Field::Failed("invalid Action.NActions count".to_owned())),
+            Ok(count) if (0..=MAX_INDEXED_ACTIONS).contains(&count) => count,
+            Ok(count) => {
+                return Ok(Field::Failed(format!(
+                    "Action.NActions out of range: {count}"
+                )));
+            }
+            Err(error) => return Ok(Field::Failed(error.to_string())),
         },
-        Field::Failed(detail) => return Ok(Field::Failed(detail)),
-        Field::Absent => return Ok(Field::Absent),
+        other => return Ok(other.map(|_| Vec::new())),
     };
-    let names = collect_bounded(
+    let reads = collect_bounded(
         ACTION_NAMES_IN_FLIGHT,
-        (0..count).map(|index| action_name(connection, element, index, String::new())),
+        (0..count).map(|index| indexed_name(connection, element, index, liveness)),
     )
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()?;
+    .await;
+    let mut names = Vec::new();
+    for read in reads {
+        match read? {
+            Field::Present(name) => names.push(name),
+            other => return Ok(other.map(|_| Vec::new())),
+        }
+    }
     Ok(Field::Present(names))
+}
+
+async fn indexed_name(
+    connection: &Connection,
+    element: &AtspiElement,
+    index: i32,
+    liveness: Liveness,
+) -> Result<Field<String>, AdapterError> {
+    let reply = call(connection, element, ACTION_INTERFACE, "GetName", &(index,)).await;
+    field(deserialize::<String>(reply), liveness)
 }
 
 #[cfg(test)]
